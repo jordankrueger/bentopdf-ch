@@ -1,105 +1,46 @@
-# Global variable declaration:
-# Build to serve under Subdirectory BASE_URL if provided, eg: "ARG BASE_URL=/pdf/", otherwise leave blank: "ARG BASE_URL="
-ARG BASE_URL=
+# CH static-fork Dockerfile template
+#
+# Build args:
+#   BUILDER_IMAGE — node base image (default: node:20-alpine)
+#   PKG_MANAGER   — npm | pnpm (default: npm)
+#   PREFIX        — path prefix served from this container (e.g., "pdf", "image", "tools")
+#   BUILD_CMD     — build script name (default: "build")
+#                   snapotter override: "turbo build --filter=@snapotter/web"
+#   DIST_PATH     — path to built output dir relative to /app (default: "dist")
+#                   snapotter override: "apps/web/dist"
+#
+# Per-fork overrides (set in Coolify / docker-compose):
+#   bentopdf:  PKG_MANAGER=npm  PREFIX=pdf     BUILD_CMD=build          DIST_PATH=dist
+#   snapotter: PKG_MANAGER=pnpm PREFIX=image   BUILD_CMD="turbo build --filter=@snapotter/web"  DIST_PATH=apps/web/dist
+#   it-tools:  PKG_MANAGER=pnpm PREFIX=tools   BUILD_CMD=build          DIST_PATH=dist
 
-# Build stage
-FROM public.ecr.aws/docker/library/node:20-alpine AS builder
+ARG BUILDER_IMAGE=node:20-alpine
+FROM ${BUILDER_IMAGE} AS build
 WORKDIR /app
-COPY package*.json ./
-COPY vendor ./vendor
-ENV HUSKY=0
-RUN npm config set fetch-retries 5 && \
-    npm config set fetch-retry-mintimeout 60000 && \
-    npm config set fetch-retry-maxtimeout 300000 && \
-    npm config set fetch-timeout 600000 && \
-    npm ci
+
+ARG PKG_MANAGER=npm
+ARG PREFIX=pdf
+ARG BUILD_CMD=build:docker
+
+# Copy lockfiles first so Docker layer cache is effective for both npm and pnpm forks
+COPY package*.json pnpm-lock.yaml* pnpm-workspace.yaml* turbo.json* ./
 COPY . .
 
-# Build without type checking (vite build only)
-# Pass SIMPLE_MODE environment variable if provided
-ARG SIMPLE_MODE=false
-ENV SIMPLE_MODE=$SIMPLE_MODE
-ARG COMPRESSION_MODE=all
-ENV COMPRESSION_MODE=$COMPRESSION_MODE
+# BASE_URL tells Vite where assets will be served from (e.g., /pdf/)
+ENV BASE_URL=/${PREFIX}/
 
-# global arg to local arg - BASE_URL is read from env by vite.config.ts
-ARG BASE_URL
-ENV BASE_URL=$BASE_URL
+RUN if [ "$PKG_MANAGER" = "pnpm" ]; then \
+      corepack enable && pnpm install --frozen-lockfile && pnpm run ${BUILD_CMD}; \
+    else \
+      npm ci && npm run ${BUILD_CMD}; \
+    fi
 
-# WASM module URLs (pre-configured defaults)
-# Override these for air-gapped or self-hosted WASM deployments
-ARG VITE_WASM_PYMUPDF_URL
-ARG VITE_WASM_GS_URL
-ARG VITE_WASM_CPDF_URL
-ENV VITE_WASM_PYMUPDF_URL=$VITE_WASM_PYMUPDF_URL
-ENV VITE_WASM_GS_URL=$VITE_WASM_GS_URL
-ENV VITE_WASM_CPDF_URL=$VITE_WASM_CPDF_URL
+# Copy built output into nginx under the prefix path
+ARG DIST_PATH=dist
 
-# OCR asset URLs (optional, used for self-hosted or air-gapped OCR)
-ARG VITE_TESSERACT_WORKER_URL
-ARG VITE_TESSERACT_CORE_URL
-ARG VITE_TESSERACT_LANG_URL
-ARG VITE_TESSERACT_AVAILABLE_LANGUAGES
-ARG VITE_OCR_FONT_BASE_URL
-ENV VITE_TESSERACT_WORKER_URL=$VITE_TESSERACT_WORKER_URL
-ENV VITE_TESSERACT_CORE_URL=$VITE_TESSERACT_CORE_URL
-ENV VITE_TESSERACT_LANG_URL=$VITE_TESSERACT_LANG_URL
-ENV VITE_TESSERACT_AVAILABLE_LANGUAGES=$VITE_TESSERACT_AVAILABLE_LANGUAGES
-ENV VITE_OCR_FONT_BASE_URL=$VITE_OCR_FONT_BASE_URL
-
-# Default UI language (e.g. en, fr, de, es, zh, ar)
-ARG VITE_DEFAULT_LANGUAGE
-ENV VITE_DEFAULT_LANGUAGE=$VITE_DEFAULT_LANGUAGE
-
-# Custom branding (e.g. VITE_BRAND_NAME=MyCompany VITE_BRAND_LOGO=my-logo.svg)
-ARG VITE_BRAND_NAME
-ARG VITE_BRAND_LOGO
-ARG VITE_FOOTER_TEXT
-ENV VITE_BRAND_NAME=$VITE_BRAND_NAME
-ENV VITE_BRAND_LOGO=$VITE_BRAND_LOGO
-ENV VITE_FOOTER_TEXT=$VITE_FOOTER_TEXT
-
-ARG DISABLE_TOOLS
-ENV DISABLE_TOOLS=$DISABLE_TOOLS
-
-# Public-facing canonical site URL. Defaults to the official site so self-hosters
-# consolidate SEO signals back to bentopdf.com. Override with --build-arg
-# SITE_URL=https://your-domain.example to claim canonical for your own deployment.
-ARG SITE_URL=https://www.bentopdf.com
-ENV SITE_URL=$SITE_URL
-
-ENV NODE_OPTIONS="--max-old-space-size=3072"
-
-RUN --mount=type=secret,id=VITE_CORS_PROXY_URL,required=false \
-    --mount=type=secret,id=VITE_CORS_PROXY_SECRET,required=false \
-    VITE_CORS_PROXY_URL=$(cat /run/secrets/VITE_CORS_PROXY_URL 2>/dev/null || echo "") \
-    VITE_CORS_PROXY_SECRET=$(cat /run/secrets/VITE_CORS_PROXY_SECRET 2>/dev/null || echo "") \
-    npm run build:with-docs
-
-# Production stage
-FROM quay.io/nginx/nginx-unprivileged:alpine-slim
-
-LABEL org.opencontainers.image.source="https://github.com/alam00000/bentopdf"
-LABEL org.opencontainers.image.url="https://github.com/alam00000/bentopdf"
-
-# global arg to local arg
-ARG BASE_URL
-
-# Set this to "true" to disable Nginx listening on IPv6
-ENV DISABLE_IPV6=false
-ENV PORT=8080
-
-USER root
-RUN apk upgrade --no-cache
-USER nginx
-
-COPY --chown=nginx:nginx --from=builder /app/dist /usr/share/nginx/html${BASE_URL%/}
-COPY --chown=nginx:nginx nginx.conf /etc/nginx/nginx.conf
-COPY --chown=nginx:nginx --from=builder /app/security-headers.conf /etc/nginx/security-headers.conf
-COPY --chown=nginx:nginx --from=builder /app/security-headers-docs.conf /etc/nginx/security-headers-docs.conf
-COPY --chown=nginx:nginx --chmod=755 nginx-ipv6.sh /docker-entrypoint.d/99-disable-ipv6.sh
-COPY --chown=nginx:nginx --chmod=755 nginx-noindex.sh /docker-entrypoint.d/98-noindex.sh
-RUN mkdir -p /etc/nginx/tmp && chown -R nginx:nginx /etc/nginx/tmp
-
-EXPOSE 8080
-CMD ["nginx", "-g", "daemon off;"]
+FROM nginx:alpine
+ARG PREFIX
+ARG DIST_PATH=dist
+COPY --from=build /app/${DIST_PATH}/ /usr/share/nginx/html/${PREFIX}/
+COPY nginx.conf /etc/nginx/conf.d/default.conf
+EXPOSE 80
