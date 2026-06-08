@@ -41,6 +41,8 @@ ARG DIST_PATH=dist
 FROM nginx:alpine
 ARG PREFIX=pdf
 ARG DIST_PATH=dist
+# Patch OS packages in the base image (e.g. libxml2 CVE-2026-6732); matches Dockerfile.nonroot
+RUN apk upgrade --no-cache
 COPY --from=build /app/${DIST_PATH}/ /usr/share/nginx/html/${PREFIX}/
 COPY nginx.conf /etc/nginx/conf.d/default.conf
 EXPOSE 80
