@@ -19,10 +19,12 @@ jobs:
     strategy:
       matrix:
         image:
+          # Only scan the image CH actually builds/ships (Dockerfile).
+          # Dockerfile.nonroot is upstream-only baggage carried by the fork
+          # sync and is never deployed by CH — no value scanning it, and its
+          # docs build path breaks on CH's ch-header.js injection.
           - name: bentopdf
             file: Dockerfile
-          - name: bentopdf-nonroot
-            file: Dockerfile.nonroot
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
